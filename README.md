@@ -1,4 +1,3 @@
 # shear-response-psf
 
-code to test response of shear to PSF errors. 
-
+Code to test response of galaxy shear to PSF errors; partially adopted from [PSFHOME](https://github.com/LSSTDESC/psfhome)
