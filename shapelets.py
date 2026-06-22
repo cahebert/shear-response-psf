@@ -15,9 +15,16 @@ class shapeletXmoment:
         self.bmax = bmax
         self.pixel_scale = pixel_scale
         self.base_psf = psf
-        self.base_psf_image = psf.drawImage(scale = pixel_scale)
-        self.base_psf_result = galsim.hsm.FindAdaptiveMom(self.base_psf_image)
-        self.base_shapelet = galsim.Shapelet.fit(self.base_psf_result.moments_sigma, bmax, self.base_psf_image, normalization = 'sb')
+        self.base_psf_image = psf.drawImage(scale=pixel_scale, method='no_pixel')
+        self.base_psf_result = galsim.hsm.FindAdaptiveMom(
+            self.base_psf_image, use_sky_coords=True
+        )
+        self.base_shapelet = galsim.Shapelet.fit(
+            self.base_psf_result.moments_sigma,
+            bmax,
+            self.base_psf_image,
+            normalization='sb',
+            )
         self.base_bvec = self.base_shapelet.bvec
 
     def moment_measure(self, image, p, q):
@@ -92,7 +99,10 @@ class shapeletXmoment:
             pert_bvec = self.base_bvec.copy()
             pert_bvec[mode_index]+=delta
             ith_pert = galsim.Shapelet(self.base_psf_result.moments_sigma, self.bmax, pert_bvec)
-            pert_moment = self.get_all_moments(ith_pert.drawImage(scale = self.pixel_scale,method = 'no_pixel'), pq_list)
+            pert_moment = self.get_all_moments(
+                ith_pert.drawImage(scale=self.pixel_scale),
+                pq_list,
+            )
             for j in range(mu):
                 A[i][j] = (pert_moment[j] - ori_moments[j])/delta
         self.A = A
@@ -249,6 +259,11 @@ class HOMExShapeletPair:
 
         #Define basic variables
         self.pixel_scale = pixel_scale
+        # n_pix should cover enough world extent regardless of pixel_scale
+        # e.g., ~75 pixels at ps=1 → 75 arcsec, so n_pix = round(75 / pixel_scale)
+        self.n_pix = max(25, int(np.ceil(25.0 / pixel_scale)))
+        if self.n_pix % 2 == 0:
+            self.n_pix += 1 # ensure n_pix is odd to have a central pixel
         self.subtract_intersection = subtract_intersection
         self.is_self_defined_PSF = is_self_defined_PSF
         self.metacal_method = metacal_method
@@ -310,8 +325,8 @@ class HOMExShapeletPair:
         else:
             self.psf_type = "self_define"
             truth_image = self_defined_PSF
-            truth_psf = galsim.InterpolatedImage(truth_image,scale = pixel_scale)
-            truth_measure = galsim.hsm.FindAdaptiveMom(truth_image)
+            truth_psf = galsim.InterpolatedImage(truth_image, scale=pixel_scale)
+            truth_measure = galsim.hsm.FindAdaptiveMom(truth_image, use_sky_coords=True)
             truth_sigma = truth_measure.moments_sigma
             self.psf_light = truth_psf
 
@@ -353,17 +368,26 @@ class HOMExShapeletPair:
 
     def measure(self, metacal=True, rot=False, base=False):
         if base:
-            image_epsf = self.psf_light.drawImage(scale=self.pixel_scale)
+            image_epsf = self.psf_light.drawImage(
+                nx=self.n_pix, ny=self.n_pix,
+                scale=self.pixel_scale
+                )
         else:
-            image_epsf = self.psf_model_light.drawImage(scale=self.pixel_scale)
+            image_epsf = self.psf_model_light.drawImage(
+                nx=self.n_pix, ny=self.n_pix,
+                scale=self.pixel_scale
+                )
 
         if rot:
             galaxy = self.gal_rotate_light
         else:
             galaxy = self.gal_light
 
-        final = galsim.Convolve([galaxy,self.psf_light])
-        image = final.drawImage(scale = self.pixel_scale)
+        final = galsim.Convolve([galaxy, self.psf_light])
+        image_obs = final.drawImage(
+            nx=self.n_pix, ny=self.n_pix, scale=self.pixel_scale
+        )
+        
         if metacal == False:
             shapes = []
             for image in images:
@@ -412,10 +436,18 @@ class HOMExShapeletPair:
 
     def toSize(self, profile, sigma, weighted=True, tol=1e-4):
         if weighted:
-            apply_pixel =  max(self.pixel_scale, sigma/10)
-            true_sigma = galsim.hsm.FindAdaptiveMom(profile.drawImage(scale =apply_pixel,method = 'no_pixel')).moments_sigma*apply_pixel
+            apply_pixel =  max(self.pixel_scale, sigma / 10)
+            true_sigma = galsim.hsm.FindAdaptiveMom(
+                profile.drawImage(
+                    nx=self.n_pix, ny=self.n_pix, 
+                    scale=apply_pixel, method='no_pixel'
+                    ),
+                use_sky_coords=True).moments_sigma
         else:
-            image = profile.drawImage(scale = self.pixel_scale, method = 'no_pixel')
+            image = profile.drawImage(
+                nx=self.n_pix, ny=self.n_pix, 
+                scale=self.pixel_scale, method='no_pixel'
+                )
             true_sigma = image.calculateMomentRadius()
 
         ratio = sigma/true_sigma
@@ -426,23 +458,64 @@ class HOMExShapeletPair:
             new_profile = new_profile.expand(ratio)
 
             if weighted:
-                apply_pixel =  max(self.pixel_scale, sigma/10)
-                true_sigma = galsim.hsm.FindAdaptiveMom(new_profile.drawImage(scale =apply_pixel,method = 'no_pixel'),hsmparams=galsim.hsm.HSMParams(max_mom2_iter = 2000)).moments_sigma*apply_pixel
+                apply_pixel = max(self.pixel_scale, sigma/10)
+                new_img = new_profile.drawImage(
+                    nx=self.n_pix, ny=self.n_pix, 
+                    scale=apply_pixel, method='no_pixel'
+                    )
+                true_sigma = galsim.hsm.FindAdaptiveMom(
+                    new_img,
+                    use_sky_coords=True,
+                    hsmparams=galsim.hsm.HSMParams(max_mom2_iter=2000)
+                    ).moments_sigma
             else:
-                #true_sigma = profile.calculateMomentRadius(scale = self.pixel_scale, rtype='trace')
-                image = new_profile.drawImage(scale = self.pixel_scale, method = 'no_pixel')
+                image = new_profile.drawImage(
+                    nx=self.n_pix, ny=self.n_pix, 
+                    scale=self.pixel_scale, method='no_pixel'
+                    )
                 true_sigma = image.calculateMomentRadius()
         return new_profile
 
-    def real_gal_sigma(self):
-        image = self.gal_light.drawImage(scale = self.pixel_scale,method = 'no_pixel')
-        return galsim.hsm.FindAdaptiveMom(image).moments_sigma*self.pixel_scale
+    def get_measured_quantities(self, gal=True):
+        m_truth = self.sxm.get_all_moments(
+            self.psf_light.drawImage(
+                nx=self.n_pix, ny=self.n_pix, scale=self.pixel_scale
+                ),
+            self.sxm.get_pq_full(self.n)
+            )
+        m_model = self.sxm.get_all_moments(
+            self.psf_model_light.drawImage(
+                nx=self.n_pix, ny=self.n_pix, 
+                scale=self.pixel_scale
+                ),
+            self.sxm.get_pq_full(self.n)
+            )
 
-    def get_actual_dm(self):
-        m_truth = self.sxm.get_all_moments(self.psf_light.drawImage(scale=self.pixel_scale), self.sxm.get_pq_full(self.n))
-        m_model = self.sxm.get_all_moments(self.psf_model_light.drawImage(scale=self.pixel_scale), self.sxm.get_pq_full(self.n))
-        return m_model - m_truth
+        # then also calculate the PSF parameter changes
+        p_truth = momhelper.get_params_from_moments(m_truth, pixel_scale=self.pixel_scale)
+        p_model = momhelper.get_params_from_moments(m_model, pixel_scale=self.pixel_scale)
 
+        for k in p_model.keys():
+            p_truth['d' + k] = p_model[k] - p_truth[k]
+        # p_out = {'d' + key: p_model[key] - p_truth[key] for key in p_truth.keys()}
+        p_truth['dt2/t2'] = p_truth['dt2']/p_truth['t2']
+        p_truth['dt4/t4'] = p_truth['dt4']/p_truth['t4']
+        p_truth['drho4/rho4'] = p_truth['drho4']/p_truth['rho4']
+
+        if gal:
+            m_gal = self.sxm.get_all_moments(
+                self.gal_light.drawImage(
+                    nx=self.n_pix, ny=self.n_pix, 
+                    scale=self.pixel_scale
+                    ),
+                self.sxm.get_pq_full(self.n)
+                )
+            p_gal = momhelper.get_params_from_moments(m_gal, pixel_scale=self.pixel_scale)
+        else:
+            p_gal = None
+            
+        return m_model - m_truth, p_truth, p_gal
+            
     def get_gal_trace(self):
         return 2 * self.gal_light.calculateMomentRadius(
             scale=self.pixel_scale,
