@@ -1,16 +1,13 @@
 """
 Shapelet-based PSF modification and shear measurement using metacalibration.
 
-This code was written by TQ Zhang, with only minor modifications made by CAH.
-
-Note:
-Metacalibration implemented in this code is based on ngmix=1.3.8.
-The code breaks if you install the >2.0.0 versions.
+Code originally written by TQ Zhang, modifified by CAH.
 """
 import numpy as np
 import galsim
 import scipy.linalg as alg
-import ngmix
+import mcal
+import momhelper
 
 class shapeletXmoment:
     def __init__(self, psf,n, bmax=10, pixel_scale=1.0):
@@ -108,7 +105,11 @@ class shapeletXmoment:
         for i in range(mu):
             true_mod_bvec[shapelet_list[i]]+=ds[i]
 
-        self.true_mod = galsim.Shapelet(self.base_psf_result.moments_sigma,  self.bmax, true_mod_bvec)
+        self.true_mod = galsim.Shapelet(
+            self.base_psf_result.moments_sigma,
+            self.bmax,
+            true_mod_bve
+        )
         return self.true_mod
 
     def step_modify_pq(self,current_moments,current_dm, current_mod_bvec ,current_psf,mu,shapelet_list,delta, pq_list):
@@ -118,8 +119,15 @@ class shapeletXmoment:
 
             pert_bvec = current_mod_bvec.copy()
             pert_bvec[mode_index]+=delta
-            ith_pert = galsim.Shapelet(self.base_psf_result.moments_sigma, self.bmax, pert_bvec)
-            pert_moment = self.get_all_moments(ith_pert.drawImage(scale = self.pixel_scale), pq_list)
+            ith_pert = galsim.Shapelet(
+                self.base_psf_result.moments_sigma,
+                self.bmax,
+                pert_bvec
+            )
+            pert_moment = self.get_all_moments(
+                ith_pert.drawImage(scale=self.pixel_scale),
+                pq_list,
+            )
             for j in range(mu):
                 A[i][j] = (pert_moment[j] - current_moments[j])/delta
 
@@ -247,7 +255,7 @@ class HOMExShapeletPair:
 
         #Define galaxy
         self.gal_type = gal_type
-        self.gal_sigma = gal_sigma
+        self.gal_sigma = gal_sigma # in physical units
         self.gal_flux=gal_flux
         self.e1 = e1
         self.e2 = e2
@@ -321,24 +329,29 @@ class HOMExShapeletPair:
         self.psf_model_light = psf_model_light
         self.dm = dm
 
-    def perc_bias(self,metacal = True):
-        base_ori_r, base_ori_e = self.measure(metacal = metacal,rot = False, base = True)
-        mod_ori_r, mod_ori_e = self.measure(metacal = metacal,rot = False, base = False)
-        base_rot_r, base_rot_e = self.measure(metacal = metacal,rot = True, base = True)
-        mod_rot_r, mod_rot_e = self.measure(metacal = metacal,rot = True, base = False)
+    def perc_bias(self, metacal=True):
+        base_ori_r, base_ori_e = self.measure(metacal=metacal, rot=False, base=True)
+        mod_ori_r, mod_ori_e = self.measure(metacal=metacal, rot=False, base=False)
+        base_rot_r, base_rot_e = self.measure(metacal=metacal, rot=True, base=True)
+        mod_rot_r, mod_rot_e = self.measure(metacal=metacal, rot=True, base=False)
+    
+        base_g_uncal = np.mean([base_ori_e, base_rot_e], axis=0)
+        mod_g_uncal = np.mean([mod_ori_e, mod_rot_e], axis=0)
 
-        R_base = np.mean(np.array([base_ori_r,base_rot_r]),axis = 0).reshape(2,2)
-        base_shape = np.mean(np.array([base_ori_e,base_rot_e]),axis = 0)
-        g_base = np.matmul(np.linalg.inv(R_base),base_shape)
+        R_base = np.mean([base_ori_r, base_rot_r], axis=0)
+        R_mod = np.mean([mod_ori_r, mod_rot_r], axis=0)
 
-        R_mod = np.mean(np.array([mod_ori_r,mod_rot_r]),axis = 0).reshape(2,2)
-        mod_shape = np.mean(np.array([mod_ori_e,mod_rot_e]),axis = 0)
-        g_mod = np.matmul(np.linalg.inv(R_mod),mod_shape)
-        #print (g_mod[0] - g_base[0])/self.g1
-        self.abs_bias = (g_mod - g_base)
-        return (g_mod - g_base)/self.g
+        g_base_values = self.calibrate_g_values(R_base, base_g_uncal)
+        g_mod_values = self.calibrate_g_values(R_mod, mod_g_uncal)
+        self.abs_bias = g_mod_values - g_base_values
 
-    def measure(self,metacal=True,rot = False, base = False):
+        return self.abs_bias/self.g
+
+    def calibrate_g_values(self, R, g_uncal_values):
+        Rinv = np.linalg.inv(R)
+        return np.matmul(Rinv, g_uncal_values)
+
+    def measure(self, metacal=True, rot=False, base=False):
         if base:
             image_epsf = self.psf_light.drawImage(scale=self.pixel_scale)
         else:
@@ -352,15 +365,21 @@ class HOMExShapeletPair:
         final = galsim.Convolve([galaxy,self.psf_light])
         image = final.drawImage(scale = self.pixel_scale)
         if metacal == False:
-            results = galsim.hsm.EstimateShear(image,image_epsf)
-            shape = galsim.Shear(e1 = results.corrected_e1, e2 = results.corrected_e2)
-            return np.array([[1.0,0,0,1.0]]),np.array([shape.g1,shape.g2])
-        else:
-            results = self.perform_metacal(image,image_epsf)
-            return results["R"].reshape((-1)), results["noshear"]
+            shapes = []
+            for image in images:
+                results = galsim.hsm.EstimateShear(image,image_epsf)
+                shape = galsim.Shear(e1=results.corrected_e1, e2=results.corrected_e2)
+                shapes.append([shape.g1, shape.g2])
 
-    def perform_metacal(self,image,image_epsf):
-        metacal = metacal_shear_measure(image,image_epsf)
+            g_uncal_values = np.array(shapes)
+            R_values = np.repeat(np.eye(2)[None, :, :], g_uncal_values.shape[0], axis=0)
+            return R_values, g_uncal_values
+        else:
+            results = self.perform_metacal(image_obs, image_epsf)
+            return results["R"], results["g_uncal"]
+
+    def perform_metacal(self, image_obs, image_epsf):
+        metacal = mcal.MetacalRunner(image_obs, image_epsf)
         metacal.measure_shear(self.metacal_method)
         results = metacal.get_results()
         return results
@@ -443,107 +462,25 @@ class HOMExShapeletPair:
         results['abs_bias'] = self.abs_bias
         results["gal_type"] = self.gal_type
         results["psf_type"] = self.psf_type
-        results["gal_sigma"] = self.gal_sigma
-        results["psf_sigma"] = self.psf_sigma
+        results["gal_sigma"] = self.gal_sigma # in physical units
+        results["psf_sigma"] = self.psf_sigma # in physical units
         results["e1"] = self.e1
         results["e2"] = self.e2
         results["e"] = self.e
         results["sersicn"] = self.sersicn
         results["gal_hlr"] = self.gal_light.calculateHLR()
         results["psf_hlr"] = self.psf_base.calculateHLR()
-        results["psf_model_sigma"] = self.psf_model_sigma
+        results["psf_model_sigma"] = self.psf_model_sigma # in physical units
         results['g'] = self.g
         results["dm"] = self.dm
-        results["actual_dm"] = self.get_actual_dm()
-        results["gal_trace"] = self.get_gal_trace()
-        results["psf_trace"] = self.get_psf_trace()
+        results["gal_trace"] = self.get_gal_trace() # in physical units
+        results["psf_trace"] = self.get_psf_trace() # in physical units
+
+        # results measured on images
+        actual_dm, actual_p, gal_p = self.get_measured_quantities()
+        results["actual_dm"] = actual_dm
+        results["actual_dp"] = {k:p for k,p in actual_p.items() if 'd' in k}
+        results["psf_p"] = {k:p for k,p in actual_p.items() if 'd' not in k}
+        results["gal_p"] = gal_p
 
         return results
-
-# Metacalibration implemented in this code is based on ngmix=1.3.8. The code breaks if you install the >2.0.0 versions.
-
-class metacal_shear_measure:
-    def __init__(self, final_image, psf_image):
-        self.final_image = final_image
-        self.final_image_array = final_image.array
-        self.psf_image = psf_image
-        self.psf_image_array = psf_image.array
-        return None
-
-    def measure_shear(self, method):
-        self.results = {}
-        if method == "estimateShear":
-            shear = self.measure_shear_estimateShear()
-        elif method == "ngmix":
-            shear = self.measure_shear_ngmix()
-        elif method == "admomBootstrap":
-            shear = self.measure_shear_admombootstrap()
-        self.results["g_cal"] = shear
-        return 0
-
-    def measure_shear_estimateShear(self):
-        obs_results = galsim.hsm.EstimateShear(self.final_image, self.psf_image)
-
-        psf_obs = ngmix.Observation(self.psf_image_array)
-        obs = ngmix.Observation(self.final_image_array, psf=psf_obs)
-
-        obdic = ngmix.metacal.get_all_metacal(obs, fixnoise=False)
-
-        g_obs = galsim.Shear(e1=obs_results.corrected_e1, e2=obs_results.corrected_e2)
-
-        self.results["g"] = g_obs
-
-        mcal_results = {}
-
-        for key in obdic:
-
-            mobs = obdic[key]
-            mpsf_array = mobs.get_psf().image
-            mimage_array = mobs.image
-
-            this_image = galsim.Image(mimage_array)
-            this_image_epsf = galsim.Image(mpsf_array)
-
-            res = galsim.hsm.EstimateShear(this_image, this_image_epsf)
-
-            res_shear = galsim.Shear(e1=res.corrected_e1, e2=res.corrected_e2)
-            this_res = {"g1": res_shear.g1, "g2": res_shear.g2}
-            # print key,this_res
-            mcal_results[key] = this_res
-
-        # calculate response R11. The shear by default
-        # is 0.01, so dgamma=0.02
-
-        g = np.array([mcal_results["noshear"]["g1"], mcal_results["noshear"]["g2"]])
-
-        R11 = (mcal_results["1p"]["g1"] - mcal_results["1m"]["g1"]) / (0.02)
-        R22 = (mcal_results["2p"]["g2"] - mcal_results["2m"]["g2"]) / (0.02)
-        R12 = (mcal_results["1p"]["g2"] - mcal_results["1m"]["g2"]) / (0.02)
-        R21 = (mcal_results["2p"]["g1"] - mcal_results["2m"]["g1"]) / (0.02)
-
-        R = np.array([[R11, R12], [R21, R22]])
-        self.results["R"] = R
-        self.results["noshear"] = g
-        Rinv = np.linalg.inv(R)
-
-        # print R11,R22
-
-        g_truth = np.matmul(Rinv, g)
-        return galsim.Shear(g1=g_truth[0], g2=g_truth[1])
-
-    def make_guess(self, array):
-
-        eps = 0.01
-        # shape = galsim.hsm.FindAdaptiveMom(galsim.Image(array))
-        pars = np.zeros(6)
-        pars[0] = 0
-        pars[1] = 0
-        pars[2] = 0
-        pars[3] = 0
-        pars[4] = 100
-        pars[5] = 1
-        return pars
-
-    def get_results(self):
-
-        return self.results
