@@ -3,6 +3,7 @@ import galsim
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import momhelper
 
 try:
     import ngmix
@@ -43,7 +44,7 @@ def home_moments(image, pixel_scale):
     sxm = shapelets.shapeletXmoment(galsim.Gaussian(fwhm=3), 4, pixel_scale=pixel_scale)
     pqlist = sxm.get_pq_full(sxm.n)
     moms = sxm.get_all_moments(image, pqlist)
-    params = shapelets.get_psfparams_from_moments(moms, pixel_scale=pixel_scale)
+    params = shapelets.get_params_from_moments(moms, pixel_scale=pixel_scale)
     params.update(method='home')
     return params
 
